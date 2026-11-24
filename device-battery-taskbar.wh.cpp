@@ -1,5 +1,5 @@
 // ==WindhawkMod==
-// @id              bluetooth-battery-tray
+// @id              device-battery-taskbar
 // @name            Device Battery in Taskbar
 // @description     Shows the battery level of connected Bluetooth and wireless devices next to the system tray (Windows 11)
 // @version         1.0

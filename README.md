@@ -39,7 +39,7 @@ Apart from the devices listed above, devices that connect through a **USB receiv
 ## Installation
 
 1. Open Windhawk and click **Create a New Mod**.
-2. Replace the editor's contents with [`bluetooth-battery-tray.wh.cpp`](bluetooth-battery-tray.wh.cpp).
+2. Replace the editor's contents with [`device-battery-taskbar.wh.cpp`](device-battery-taskbar.wh.cpp).
 3. Click **Compile Mod**, then **Exit editing mode**.
 
 To update, open the mod, click **Edit**, paste the new version and compile again.
@@ -125,6 +125,6 @@ The Razer mouse and XInput controller reading, the charging indicator and the di
 
 ## Files
 
-- [`bluetooth-battery-tray.wh.cpp`](bluetooth-battery-tray.wh.cpp): the mod source.
+- [`device-battery-taskbar.wh.cpp`](device-battery-taskbar.wh.cpp): the mod source.
 - [`estilos-para-colar.txt`](estilos-para-colar.txt): the Taskbar Styler styles, ready to paste.
 - [`LICENSE`](LICENSE): the full GPL-3.0 text.
