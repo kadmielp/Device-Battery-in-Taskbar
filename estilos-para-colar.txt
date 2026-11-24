@@ -1,0 +1,14 @@
+ESTILOS PARA O WINDOWS 11 TASKBAR STYLER
+(Windhawk > Taskbar Styler > Settings > Control styles)
+
+Relogio/bandeja colados na borda direita, apps centralizados:
+
+Target:
+SystemTray.SystemTrayFrame
+
+Styles (dois campos):
+HorizontalAlignment=Right
+Margin=0,0,0,0
+
+Obs.: a entrada "Taskbar.TaskbarFrame" com MaxWidth nao e mais necessaria
+e pode ser apagada.
