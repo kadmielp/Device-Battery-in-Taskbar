@@ -16,6 +16,11 @@
 // FindSystemTrayFrame and the XAML tree helpers) are adapted from the
 // "Taskbar tray icon spacing and grid" mod by m417z:
 // https://github.com/ramensoftware/windhawk-mods
+//
+// The Razer mouse and XInput controller reading, the charging indicator and
+// the display modes are based on the "Wireless Battery Indicator" mod by
+// simonzk27:
+// https://github.com/simonzk27/windhawk-mods/blob/main/mods/taskbar-wireless-battery.wh.cpp
 
 // ==WindhawkModReadme==
 /*

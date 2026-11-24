@@ -119,6 +119,8 @@ The mod works with the [Windows 11 Taskbar Styler](https://windhawk.net/mods/win
 
 Parts of the taskbar access code are adapted from the [Taskbar tray icon spacing and grid](https://windhawk.net/mods/taskbar-notification-icon-spacing) mod by [m417z](https://github.com/m417z), which is also published under the GPL-3.0.
 
+The Razer mouse and XInput controller reading, the charging indicator and the display modes are based on the [Wireless Battery Indicator](https://github.com/simonzk27/windhawk-mods/blob/main/mods/taskbar-wireless-battery.wh.cpp) mod by [simonzk27](https://github.com/simonzk27).
+
 ## Files
 
 - [`bluetooth-battery-tray.wh.cpp`](bluetooth-battery-tray.wh.cpp): the mod source.
