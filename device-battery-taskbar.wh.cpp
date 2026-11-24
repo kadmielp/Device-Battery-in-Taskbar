@@ -27,13 +27,16 @@
 # Device Battery in Taskbar
 
 Automatically detects connected Bluetooth devices (headphones, mice, keyboards,
-controllers, pens...) of any brand and shows an icon plus the battery level of
-each one in the taskbar, next to the Wi-Fi / volume / battery button.
+controllers, pens...) and shows an icon plus the battery level of each one in
+the taskbar, next to the Wi-Fi / volume / battery button.
 
-* A device appears when it connects and disappears when it disconnects.
-* Only devices that report their battery level to Windows are shown (the same
-  value that appears in Settings > Bluetooth & devices).
-* Read directly from the device, without extra software:
+* Works with Bluetooth devices of any brand that report their battery level to
+  Windows (the value that appears in Settings > Bluetooth & devices). Devices
+  that don't report it can't be shown.
+* A device appears when it connects and disappears when it disconnects, within
+  the refresh interval.
+* Read directly from the device, without extra software (Xbox and Razer
+  reading not yet tested on real devices):
   * PS4 / PS5 controllers (Bluetooth or USB), with charging state.
   * Xbox controllers through USB or the Xbox Wireless Adapter (4 approximate
     levels, shown as "~65%").

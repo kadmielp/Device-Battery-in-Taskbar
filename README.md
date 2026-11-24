@@ -1,13 +1,13 @@
 # Device Battery in Taskbar
 
-A [Windhawk](https://windhawk.net) mod for Windows 11 that shows the battery level of your connected Bluetooth and wireless devices in the taskbar, next to the system tray.
+A [Windhawk](https://windhawk.net) mod for Windows 11 that shows the battery level of your connected Bluetooth devices, and of some USB-receiver and wired devices, in the taskbar, next to the system tray.
 
 ![A pen tablet at 10% in the low battery color and a game controller at 74%, shown left of the system tray](images/taskbar-example.png)
 
 ## Features
 
-- **Automatic detection**: works with any brand, with no setup.
-- **Devices read directly**, without extra software:
+- **Automatic detection, no setup**: any Bluetooth device, of any brand, that reports its battery to Windows (the level shown in **Settings → Bluetooth & devices**). Many Bluetooth headphones, mice, keyboards and pens do; some don't, and those can't be shown.
+- **Devices read directly**, without extra software, when Windows doesn't report their battery:
 
   | Device | Battery | Charging |
   |---|---|---|
@@ -17,10 +17,12 @@ A [Windhawk](https://windhawk.net) mod for Windows 11 that shows the battery lev
   | JBL Quantum 350 Wireless (USB receiver) | ✅ exact % | — |
 
   Xbox controllers paired over Bluetooth are reported by Windows with their exact level.
+
+  Tested on real hardware: PS4 controller and JBL Quantum 350 Wireless. The Xbox (USB and Wireless Adapter) and Razer readings follow the protocols other projects use, but haven't been tested with those devices.
 - **Charging indicator**: a lightning bolt next to the percentage while charging.
 - **Display modes**: icon + percentage, icon only, percentage only, or icon + battery bar.
 - **One icon and percentage per device**: headphones, headset, mouse, keyboard, game controller, speaker, phone, pen/tablet, or a generic Bluetooth icon.
-- **Live updates**: devices appear when they connect and disappear when they disconnect.
+- **Regular updates**: devices appear when they connect and disappear when they disconnect, within the refresh interval (15 s by default).
 - **Hides devices that don't report a battery level.**
 - **Low battery color** (red by default), optionally applied to the icon too.
 - **Tooltip** with the device name, and a **click opens Bluetooth settings**.
@@ -30,7 +32,7 @@ A [Windhawk](https://windhawk.net) mod for Windows 11 that shows the battery lev
 
 - Windows 11, with the XAML taskbar. Tested on build 26300 (Insider).
 - Windhawk 1.7 or later.
-- Devices that report their battery level to Windows. A device does this if its battery appears in **Settings → Bluetooth & devices**. PlayStation controllers are the exception: the mod reads them directly.
+- Devices that report their battery level to Windows. A device does this if its battery appears in **Settings → Bluetooth & devices**. The devices in the table above are the exception: the mod reads them directly.
 
 ### Not supported
 
@@ -90,7 +92,8 @@ The mod works with the [Windows 11 Taskbar Styler](https://windhawk.net/mods/win
 ## Troubleshooting
 
 **Nothing appears**
-- Check that the device is connected and shows its battery in **Settings → Bluetooth & devices**.
+- Bluetooth devices: check that the device is connected and shows its battery in **Settings → Bluetooth & devices**. If Settings shows no battery, the mod can't either.
+- Devices in the table above: check that the device is turned on, not just its USB receiver.
 - Wait up to the refresh interval (15 s by default).
 - To see what the mod is doing, turn on logs: open the mod in Windhawk, go to the **Advanced** tab and set **Debug logging → Mod logs**.
 
@@ -110,7 +113,7 @@ The mod works with the [Windows 11 Taskbar Styler](https://windhawk.net/mods/win
 - **Xbox controllers (XInput)**: `xinput1_4.dll` is loaded for each refresh, so controllers connected later are seen. Controllers already reported over Bluetooth are skipped to avoid duplicates.
 - **Razer mice**: 90-byte HID feature reports on the mouse interface (vendor `1532`), as documented by [OpenRazer](https://github.com/openrazer/openrazer): class `0x07`, command `0x80` for the battery and `0x84` for charging.
 - **JBL Quantum 350 Wireless**: the mod reads HID feature report `0x49` from the USB receiver (vendor `0ECB`), the same read JBL's QuantumENGINE app makes. The report holds the battery percentage in one byte, and reading it doesn't send any command to the headset. While the headset is off the receiver answers 0, and the mod hides it.
-- **Device type**: comes from the container's category (`Input.Mouse`, `Audio.Headphone`, …). If the category doesn't say, the mod falls back to keywords in the device name.
+- **Device type**: for Bluetooth devices, comes from the container's category (`Input.Mouse`, `Audio.Headphone`, …). If the category doesn't say, and for the devices read directly, the mod uses keywords in the device name.
 - **Interface**: the mod gets the taskbar's `XamlRoot` through `taskbar.dll` symbols, without XAML diagnostics. It then inserts a `StackPanel` with a `FontIcon` (Segoe Fluent Icons) and a `TextBlock` for each device. All XAML changes run on the taskbar thread.
 - **"Left of the tray" layout**: the panel goes into the tray's parent grid, with margins that keep its desired size at zero. That keeps the tray's size unchanged, and the tray's size is what the taskbar uses to work out the app area.
 - **Unloading**: disabling the mod removes the panel and restores the original layout.
