@@ -7,7 +7,7 @@
 // @github          https://github.com/kadmielp
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -lole32 -loleaut32 -lruntimeobject -lshell32 -lsetupapi -lhid
+// @compilerOptions -lole32 -loleaut32 -lruntimeobject -lshell32 -lsetupapi -lhid -lcfgmgr32
 // ==/WindhawkMod==
 
 // Source code is published under The GNU General Public License v3.0.
@@ -137,6 +137,8 @@ Only Windows 11 is supported.
 
 #include <shellapi.h>
 #include <setupapi.h>
+#include <cfgmgr32.h>
+#include <devpropdef.h>
 
 #include <xinput.h>
 
@@ -520,6 +522,7 @@ DeviceType DetectDeviceType(const std::wstring& name,
         {L"speaker", DeviceType::speaker},
         {L"soundbar", DeviceType::speaker},
         {L"caixa", DeviceType::speaker},
+        {L"quantum", DeviceType::headset},
         {L"jbl", DeviceType::speaker},
         {L"phone", DeviceType::phone},
         {L"galaxy", DeviceType::phone},
@@ -1104,50 +1107,175 @@ void QueryRazerMice(const Settings& settings,
     }
 }
 
-std::vector<DeviceEntry> QueryDevices(const Settings& settings) {
-    auto deviceProps = winrt::single_threaded_vector<winrt::hstring>(
-        {kBatteryKey, kContainerIdKey});
+// JBL Quantum 350 Wireless USB receivers (vendor 0ECB). JBL's QuantumENGINE app
+// reads the headset battery as HID feature report 0x49: the report id followed
+// by one byte with the percentage. Reading it doesn't change anything on the
+// headset. The receiver answers 0 while the headset is off.
+const USHORT kJblQuantumProductIds[] = {
+    0x206B,  // Quantum 350 Wireless (350T, first receiver revision)
+    0x20B2,  // Quantum 350 Wireless (350T, second receiver revision)
+    0x2047,  // Quantum 350 Wireless (350B)
+};
 
-    winrt::Windows::Devices::Enumeration::DeviceInformationCollection
-        devices{nullptr};
-    try {
-        // Only devices currently present.
-        devices = DeviceInformation::FindAllAsync(
-                      L"System.Devices.Present:=System.StructuredQueryType.Boolean#True",
-                      deviceProps,
-                      DeviceInformationKind::Device)
-                      .get();
-    } catch (...) {
-        Wh_Log(L"Filtered query failed (%08X), querying all devices",
-               winrt::to_hresult().value);
-        devices = DeviceInformation::FindAllAsync(
-                      L"", deviceProps, DeviceInformationKind::Device)
-                      .get();
+void QueryJblQuantumHeadsets(const Settings& settings,
+                             std::vector<DeviceEntry>& result) {
+    GUID hidGuid;
+    HidD_GetHidGuid(&hidGuid);
+
+    HDEVINFO devInfo = SetupDiGetClassDevs(
+        &hidGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (devInfo == INVALID_HANDLE_VALUE) {
+        return;
     }
 
-    // One entry per physical device (container).
+    SP_DEVICE_INTERFACE_DATA interfaceData{sizeof(interfaceData)};
+    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(devInfo, nullptr, &hidGuid,
+                                                  i, &interfaceData);
+         i++) {
+        DWORD size = 0;
+        SetupDiGetDeviceInterfaceDetail(devInfo, &interfaceData, nullptr, 0,
+                                        &size, nullptr);
+        if (!size) {
+            continue;
+        }
+
+        std::vector<BYTE> buffer(size);
+        auto* detail =
+            reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buffer.data());
+        detail->cbSize = sizeof(*detail);
+        if (!SetupDiGetDeviceInterfaceDetail(devInfo, &interfaceData, detail,
+                                             size, nullptr, nullptr)) {
+            continue;
+        }
+
+        if (ToLower(detail->DevicePath).find(L"vid_0ecb") ==
+            std::wstring::npos) {
+            continue;
+        }
+
+        HANDLE device = CreateFile(detail->DevicePath, 0,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                   OPEN_EXISTING, 0, nullptr);
+        if (device == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+
+        HIDD_ATTRIBUTES attributes{sizeof(attributes)};
+        HIDP_CAPS caps{};
+        bool capsOk = false;
+        PHIDP_PREPARSED_DATA preparsed = nullptr;
+        if (HidD_GetAttributes(device, &attributes) &&
+            HidD_GetPreparsedData(device, &preparsed)) {
+            capsOk = HidP_GetCaps(preparsed, &caps) == HIDP_STATUS_SUCCESS;
+            HidD_FreePreparsedData(preparsed);
+        }
+
+        bool known = false;
+        for (USHORT pid : kJblQuantumProductIds) {
+            if (attributes.ProductID == pid) {
+                known = true;
+                break;
+            }
+        }
+
+        // Only the collection with JBL's feature reports, not the media keys.
+        if (capsOk && known && caps.FeatureReportByteLength > 0) {
+            std::vector<BYTE> report(caps.FeatureReportByteLength);
+            report[0] = 0x49;
+            if (HidD_GetFeature(device, report.data(), (ULONG)report.size()) &&
+                report[0] == 0x49) {
+                int battery = report[1];
+                if (battery > 0 && battery <= 100) {
+                    AddDirectDevice(result, settings, L"JBL Quantum 350",
+                                    battery, /*charging=*/false,
+                                    /*approximate=*/false);
+                } else {
+                    Wh_Log(L"JBL Quantum: headset off or not paired (%d)",
+                           battery);
+                }
+            }
+        }
+
+        CloseHandle(device);
+    }
+
+    SetupDiDestroyDeviceInfoList(devInfo);
+}
+
+// DEVPKEY_Bluetooth_Battery.
+const DEVPROPKEY kBluetoothBatteryKey = {
+    {0x104EA319, 0x6EE2, 0x4701, {0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5}},
+    2};
+
+// DEVPKEY_Device_ContainerId.
+const DEVPROPKEY kDeviceContainerIdKey = {
+    {0x8C7ED206, 0x3F8A, 0x4827, {0xB3, 0xAB, 0xAE, 0x9E, 0x1F, 0xAE, 0xFC, 0x6C}},
+    2};
+
+// Battery level of every present Bluetooth device node, one per physical device
+// (container). Only the Bluetooth enumerators are listed: listing every device
+// of the PC to find the few with a battery cost a lot more.
+std::map<std::wstring, int> QueryBluetoothBatteries() {
     std::map<std::wstring, int> batteryByContainer;
-    for (const auto& device : devices) {
-        auto props = device.Properties();
-        auto batteryValue = props.TryLookup(kBatteryKey);
-        auto containerValue = props.TryLookup(kContainerIdKey);
-        if (!batteryValue || !containerValue) {
+
+    for (PCWSTR enumerator :
+         {L"BTHENUM", L"BTHLE", L"BTHLEDEVICE", L"BTHHFENUM"}) {
+        ULONG flags = CM_GETIDLIST_FILTER_ENUMERATOR |
+                      CM_GETIDLIST_FILTER_PRESENT;
+        std::vector<WCHAR> list;
+        CONFIGRET cr;
+        do {
+            ULONG size = 0;
+            cr = CM_Get_Device_ID_List_Size(&size, enumerator, flags);
+            if (cr != CR_SUCCESS || size <= 1) {
+                break;
+            }
+            list.resize(size);
+            cr = CM_Get_Device_ID_List(enumerator, list.data(), size, flags);
+        } while (cr == CR_BUFFER_SMALL);
+        if (cr != CR_SUCCESS || list.empty()) {
             continue;
         }
 
-        auto battery = PropertyToInt(batteryValue);
-        auto containerId = containerValue.try_as<winrt::Windows::Foundation::
-                                                      IReference<winrt::guid>>();
-        if (!battery || *battery < 0 || *battery > 100 || !containerId) {
-            continue;
-        }
+        for (PCWSTR id = list.data(); *id; id += wcslen(id) + 1) {
+            DEVINST devInst;
+            if (CM_Locate_DevNode(&devInst, const_cast<PWSTR>(id),
+                                  CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) {
+                continue;
+            }
 
-        std::wstring id = GuidToString(containerId.Value());
-        auto it = batteryByContainer.find(id);
-        if (it == batteryByContainer.end() || it->second < *battery) {
-            batteryByContainer[id] = *battery;
+            DEVPROPTYPE type;
+            BYTE battery = 0;
+            ULONG size = sizeof(battery);
+            if (CM_Get_DevNode_Property(devInst, &kBluetoothBatteryKey, &type,
+                                        &battery, &size, 0) != CR_SUCCESS ||
+                type != DEVPROP_TYPE_BYTE || battery > 100) {
+                continue;
+            }
+
+            GUID container;
+            size = sizeof(container);
+            if (CM_Get_DevNode_Property(devInst, &kDeviceContainerIdKey, &type,
+                                        reinterpret_cast<BYTE*>(&container),
+                                        &size, 0) != CR_SUCCESS ||
+                type != DEVPROP_TYPE_GUID) {
+                continue;
+            }
+
+            std::wstring key =
+                GuidToString(reinterpret_cast<const winrt::guid&>(container));
+            auto it = batteryByContainer.find(key);
+            if (it == batteryByContainer.end() || it->second < battery) {
+                batteryByContainer[key] = battery;
+            }
         }
     }
+
+    return batteryByContainer;
+}
+
+std::vector<DeviceEntry> QueryDevices(const Settings& settings) {
+    auto batteryByContainer = QueryBluetoothBatteries();
 
     auto containerProps = winrt::single_threaded_vector<winrt::hstring>(
         {kConnectedKey, kCategoryKey});
@@ -1221,6 +1349,12 @@ std::vector<DeviceEntry> QueryDevices(const Settings& settings) {
         QueryRazerMice(settings, result);
     } catch (...) {
         Wh_Log(L"Razer query failed");
+    }
+
+    try {
+        QueryJblQuantumHeadsets(settings, result);
+    } catch (...) {
+        Wh_Log(L"JBL Quantum query failed");
     }
 
     std::sort(result.begin(), result.end(),

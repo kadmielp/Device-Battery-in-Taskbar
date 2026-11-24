@@ -14,6 +14,7 @@ A [Windhawk](https://windhawk.net) mod for Windows 11 that shows your connected 
   | PS4 / PS5 controllers (Bluetooth or USB) | ✅ 10% steps | ✅ |
   | Xbox controllers via USB or Xbox Wireless Adapter | ✅ approximate (4 levels, shown as `~65%`) | — |
   | Razer mice (HyperSpeed dongle or cable) | ✅ exact % | ✅ |
+  | JBL Quantum 350 Wireless (USB receiver) | ✅ exact % | — |
 
   Xbox controllers paired over Bluetooth are reported by Windows with their exact level.
 - **Charging indicator**: a lightning bolt next to the percentage while charging.
@@ -33,7 +34,7 @@ A [Windhawk](https://windhawk.net) mod for Windows 11 that shows your connected 
 
 ### Not supported
 
-Apart from the devices listed above, devices that connect through a **USB receiver/dongle (2.4 GHz)**, such as Logitech Unifying/Lightspeed or JBL Quantum headsets, don't report their battery to Windows. The receiver also stays connected while the device is off. Supporting them would need code for each brand's protocol.
+Apart from the devices listed above, devices that connect through a **USB receiver/dongle (2.4 GHz)**, such as Logitech Unifying/Lightspeed or other JBL Quantum headsets, don't report their battery to Windows. The receiver also stays connected while the device is off. Supporting them would need code for each brand's protocol.
 
 ## Installation
 
@@ -104,10 +105,11 @@ The mod works with the [Windows 11 Taskbar Styler](https://windhawk.net/mods/win
 
 ## How it works
 
-- **Detection**: a background thread queries the present PnP devices (`Windows.Devices.Enumeration`) for the `DEVPKEY_Bluetooth_Battery` property, the same value Windows Settings shows. It groups devices by `ContainerId` and keeps the ones whose container reports `System.Devices.Connected`.
+- **Detection**: a background thread lists only the present Bluetooth devices (CfgMgr32, enumerators `BTHENUM`, `BTHLE`, `BTHLEDEVICE` and `BTHHFENUM`) and reads their `DEVPKEY_Bluetooth_Battery` property, the same value Windows Settings shows. It groups devices by `ContainerId` and keeps the ones whose container reports `System.Devices.Connected`.
 - **PlayStation controllers**: the mod finds Sony HID devices (vendor `054C`) and reads one input report, where the battery level is stored. Over Bluetooth, it first reads a calibration feature report, which switches the controller to the full reports that carry the battery, as Steam and DS4Windows do. The values come in 10% steps, decoded as in the Linux `hid-playstation` driver.
 - **Xbox controllers (XInput)**: `xinput1_4.dll` is loaded for each refresh, so controllers connected later are seen. Controllers already reported over Bluetooth are skipped to avoid duplicates.
 - **Razer mice**: 90-byte HID feature reports on the mouse interface (vendor `1532`), as documented by [OpenRazer](https://github.com/openrazer/openrazer): class `0x07`, command `0x80` for the battery and `0x84` for charging.
+- **JBL Quantum 350 Wireless**: the mod reads HID feature report `0x49` from the USB receiver (vendor `0ECB`), the same read JBL's QuantumENGINE app makes. The report holds the battery percentage in one byte, and reading it doesn't send any command to the headset. While the headset is off the receiver answers 0, and the mod hides it.
 - **Device type**: comes from the container's category (`Input.Mouse`, `Audio.Headphone`, …). If the category doesn't say, the mod falls back to keywords in the device name.
 - **Interface**: the mod gets the taskbar's `XamlRoot` through `taskbar.dll` symbols, without XAML diagnostics. It then inserts a `StackPanel` with a `FontIcon` (Segoe Fluent Icons) and a `TextBlock` for each device. All XAML changes run on the taskbar thread.
 - **"Left of the tray" layout**: the panel goes into the tray's parent grid, with margins that keep its desired size at zero. That keeps the tray's size unchanged, and the tray's size is what the taskbar uses to work out the app area.
