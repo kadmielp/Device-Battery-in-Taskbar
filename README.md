@@ -1,6 +1,6 @@
-# Bluetooth Battery in Taskbar
+# Device Battery in Taskbar
 
-A [Windhawk](https://windhawk.net) mod for Windows 11 that shows your connected Bluetooth devices and their battery levels in the taskbar, next to the system tray.
+A [Windhawk](https://windhawk.net) mod for Windows 11 that shows the battery level of your connected Bluetooth and wireless devices in the taskbar, next to the system tray.
 
 ![A pen tablet at 10% in the low battery color and a game controller at 74%, shown left of the system tray](images/taskbar-example.png)
 

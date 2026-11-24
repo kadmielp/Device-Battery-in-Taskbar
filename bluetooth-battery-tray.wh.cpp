@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id              bluetooth-battery-tray
-// @name            Bluetooth Battery in Taskbar
-// @description     Shows connected Bluetooth devices and their battery level next to the system tray (Windows 11)
+// @name            Device Battery in Taskbar
+// @description     Shows the battery level of connected Bluetooth and wireless devices next to the system tray (Windows 11)
 // @version         1.0
 // @author          kadmielp
 // @github          https://github.com/kadmielp
@@ -24,7 +24,7 @@
 
 // ==WindhawkModReadme==
 /*
-# Bluetooth Battery in Taskbar
+# Device Battery in Taskbar
 
 Automatically detects connected Bluetooth devices (headphones, mice, keyboards,
 controllers, pens...) of any brand and shows an icon plus the battery level of
@@ -38,6 +38,7 @@ each one in the taskbar, next to the Wi-Fi / volume / battery button.
   * Xbox controllers through USB or the Xbox Wireless Adapter (4 approximate
     levels, shown as "~65%").
   * Razer mice on the HyperSpeed dongle or cable, with charging state.
+  * JBL Quantum 350 Wireless headsets on their USB receiver.
 * Other devices that use a USB receiver (2.4 GHz dongle) don't report battery
   to Windows and are not supported.
 
