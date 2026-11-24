@@ -7,6 +7,17 @@ A [Windhawk](https://windhawk.net) mod for Windows 11 that shows your connected 
 ## Features
 
 - **Automatic detection**: works with any brand, with no setup.
+- **Devices read directly**, without extra software:
+
+  | Device | Battery | Charging |
+  |---|---|---|
+  | PS4 / PS5 controllers (Bluetooth or USB) | ✅ 10% steps | ✅ |
+  | Xbox controllers via USB or Xbox Wireless Adapter | ✅ approximate (4 levels, shown as `~65%`) | — |
+  | Razer mice (HyperSpeed dongle or cable) | ✅ exact % | ✅ |
+
+  Xbox controllers paired over Bluetooth are reported by Windows with their exact level.
+- **Charging indicator**: a lightning bolt next to the percentage while charging.
+- **Display modes**: icon + percentage, icon only, percentage only, or icon + battery bar.
 - **One icon and percentage per device**: headphones, headset, mouse, keyboard, game controller, speaker, phone, pen/tablet, or a generic Bluetooth icon.
 - **Live updates**: devices appear when they connect and disappear when they disconnect.
 - **Hides devices that don't report a battery level.**
@@ -18,11 +29,11 @@ A [Windhawk](https://windhawk.net) mod for Windows 11 that shows your connected 
 
 - Windows 11, with the XAML taskbar. Tested on build 26300 (Insider).
 - Windhawk 1.7 or later.
-- Devices that report their battery level to Windows. A device does this if its battery appears in **Settings → Bluetooth & devices**.
+- Devices that report their battery level to Windows. A device does this if its battery appears in **Settings → Bluetooth & devices**. PlayStation controllers are the exception: the mod reads them directly.
 
 ### Not supported
 
-Devices that connect through a **USB receiver/dongle (2.4 GHz)**, such as Logitech Unifying/Lightspeed or Razer HyperSpeed, don't report their battery to Windows. The receiver also stays connected while the device is off. Supporting them would need code for each brand's protocol.
+Apart from the devices listed above, devices that connect through a **USB receiver/dongle (2.4 GHz)**, such as Logitech Unifying/Lightspeed or JBL Quantum headsets, don't report their battery to Windows. The receiver also stays connected while the device is off. Supporting them would need code for each brand's protocol.
 
 ## Installation
 
@@ -37,14 +48,16 @@ To update, open the mod, click **Edit**, paste the new version and compile again
 | Setting | Default | Description |
 |---|---|---|
 | Position | Left of the tray | Where the devices appear. See [Position](#position). |
-| Show device icon | On | Shows the device type icon. |
-| Show battery percentage | On | Shows the percentage. |
+| Display mode | Icon and percentage | Icon and percentage, icon only, percentage only, or icon and battery bar. |
+| Show charging indicator | On | Lightning bolt while charging, for devices that report it. |
 | Only show devices at or below | 100 | For example, 30 shows a device only once its battery is at 30% or less. |
 | Low battery level | 20 | The battery level that triggers the low battery color. |
 | Low battery color | `#FF6B6B` | `#RRGGBB`. Leave empty to turn the color change off. |
 | Also color the icon when low | On | Applies the low battery color to the icon as well. |
 | Text and icon color | *(empty)* | Empty follows the taskbar theme. Otherwise `#RRGGBB`. |
+| Font | *(empty)* | Font of the percentage. Empty uses the taskbar font. |
 | Text size / Icon size | 14 / 15 | In pixels. |
+| Bold text | Off | |
 | Spacing between icon and percentage | 4 | |
 | Spacing between devices | 12 | |
 | Left / right margin | 6 / 6 | With "Left of the tray", the right margin is the gap to the tray. |
@@ -92,6 +105,9 @@ The mod works with the [Windows 11 Taskbar Styler](https://windhawk.net/mods/win
 ## How it works
 
 - **Detection**: a background thread queries the present PnP devices (`Windows.Devices.Enumeration`) for the `DEVPKEY_Bluetooth_Battery` property, the same value Windows Settings shows. It groups devices by `ContainerId` and keeps the ones whose container reports `System.Devices.Connected`.
+- **PlayStation controllers**: the mod finds Sony HID devices (vendor `054C`) and reads one input report, where the battery level is stored. Over Bluetooth, it first reads a calibration feature report, which switches the controller to the full reports that carry the battery, as Steam and DS4Windows do. The values come in 10% steps, decoded as in the Linux `hid-playstation` driver.
+- **Xbox controllers (XInput)**: `xinput1_4.dll` is loaded for each refresh, so controllers connected later are seen. Controllers already reported over Bluetooth are skipped to avoid duplicates.
+- **Razer mice**: 90-byte HID feature reports on the mouse interface (vendor `1532`), as documented by [OpenRazer](https://github.com/openrazer/openrazer): class `0x07`, command `0x80` for the battery and `0x84` for charging.
 - **Device type**: comes from the container's category (`Input.Mouse`, `Audio.Headphone`, …). If the category doesn't say, the mod falls back to keywords in the device name.
 - **Interface**: the mod gets the taskbar's `XamlRoot` through `taskbar.dll` symbols, without XAML diagnostics. It then inserts a `StackPanel` with a `FontIcon` (Segoe Fluent Icons) and a `TextBlock` for each device. All XAML changes run on the taskbar thread.
 - **"Left of the tray" layout**: the panel goes into the tray's parent grid, with margins that keep its desired size at zero. That keeps the tray's size unchanged, and the tray's size is what the taskbar uses to work out the app area.

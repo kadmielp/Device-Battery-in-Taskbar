@@ -7,7 +7,7 @@
 // @github          https://github.com/kadmielp
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -lole32 -loleaut32 -lruntimeobject -lshell32
+// @compilerOptions -lole32 -loleaut32 -lruntimeobject -lshell32 -lsetupapi -lhid
 // ==/WindhawkMod==
 
 // Source code is published under The GNU General Public License v3.0.
@@ -28,8 +28,13 @@ each one in the taskbar, next to the Wi-Fi / volume / battery button.
 * A device appears when it connects and disappears when it disconnects.
 * Only devices that report their battery level to Windows are shown (the same
   value that appears in Settings > Bluetooth & devices).
-* Devices that use a USB receiver (2.4 GHz dongle) don't report battery to
-  Windows and are not supported.
+* Read directly from the device, without extra software:
+  * PS4 / PS5 controllers (Bluetooth or USB), with charging state.
+  * Xbox controllers through USB or the Xbox Wireless Adapter (4 approximate
+    levels, shown as "~65%").
+  * Razer mice on the HyperSpeed dongle or cable, with charging state.
+* Other devices that use a USB receiver (2.4 GHz dongle) don't report battery
+  to Windows and are not supported.
 
 Hover a device to see its name, click it to open the Bluetooth settings.
 
@@ -50,10 +55,16 @@ Only Windows 11 is supported.
   - beforeControlCenter: Left of the Wi-Fi / volume / battery button
   - afterControlCenter: Between the Wi-Fi / volume / battery button and the clock
   - beforeTrayIcons: Left of the tray icons
-- showIcon: true
-  $name: Show device icon
-- showPercentage: true
-  $name: Show battery percentage
+- displayMode: iconAndPercent
+  $name: Display mode
+  $options:
+  - iconAndPercent: Icon and percentage
+  - iconOnly: Icon only
+  - percentOnly: Percentage only
+  - batteryBar: Icon and battery bar
+- showChargingIndicator: true
+  $name: Show charging indicator
+  $description: A lightning bolt while the device charges, for devices that report it (PlayStation controllers, Razer mice).
 - showOnlyBelow: 100
   $name: Only show devices at or below this battery level (%)
   $description: 100 shows every device. For example, 30 shows a device only when its battery is at 30% or less.
@@ -67,8 +78,13 @@ Only Windows 11 is supported.
 - textColor: ""
   $name: Text and icon color
   $description: Leave empty to follow the taskbar theme. Format #RRGGBB.
+- fontFamily: ""
+  $name: Font
+  $description: Leave empty for the default taskbar font.
 - fontSize: 14
   $name: Text size
+- bold: false
+  $name: Bold text
 - iconSize: 15
   $name: Icon size
 - iconTextSpacing: 4
@@ -115,6 +131,13 @@ Only Windows 11 is supported.
 #include <windhawk_utils.h>
 
 #include <shellapi.h>
+#include <setupapi.h>
+
+#include <xinput.h>
+
+extern "C" {
+#include <hidsdi.h>
+}
 
 #include <algorithm>
 #include <atomic>
@@ -134,6 +157,7 @@ Only Windows 11 is supported.
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/base.h>
 
@@ -172,10 +196,14 @@ struct IconOverride {
     DeviceType type;
 };
 
+enum class DisplayMode { iconAndPercent, iconOnly, percentOnly, batteryBar };
+
 struct Settings {
     Position position = Position::leftOfTray;
-    bool showIcon = true;
-    bool showPercentage = true;
+    DisplayMode displayMode = DisplayMode::iconAndPercent;
+    bool showChargingIndicator = true;
+    std::wstring fontFamily;
+    bool bold = false;
     int showOnlyBelow = 100;
     int lowBatteryThreshold = 20;
     std::optional<winrt::Windows::UI::Color> lowBatteryColor;
@@ -284,11 +312,17 @@ void LoadSettings() {
         s.position = Position::beforeTrayIcons;
     }
 
-    s.showIcon = Wh_GetIntSetting(L"showIcon");
-    s.showPercentage = Wh_GetIntSetting(L"showPercentage");
-    if (!s.showIcon && !s.showPercentage) {
-        s.showPercentage = true;
+    std::wstring displayMode = GetString(L"displayMode");
+    if (displayMode == L"iconOnly") {
+        s.displayMode = DisplayMode::iconOnly;
+    } else if (displayMode == L"percentOnly") {
+        s.displayMode = DisplayMode::percentOnly;
+    } else if (displayMode == L"batteryBar") {
+        s.displayMode = DisplayMode::batteryBar;
     }
+    s.showChargingIndicator = Wh_GetIntSetting(L"showChargingIndicator");
+    s.fontFamily = GetString(L"fontFamily");
+    s.bold = Wh_GetIntSetting(L"bold");
     s.showOnlyBelow = std::clamp(Wh_GetIntSetting(L"showOnlyBelow"), 0, 100);
     s.lowBatteryThreshold =
         std::clamp(Wh_GetIntSetting(L"lowBatteryThreshold"), 0, 100);
@@ -349,9 +383,45 @@ struct DeviceEntry {
     std::wstring name;
     int battery;
     DeviceType type;
+    bool charging = false;
+    // Battery reported in coarse levels (XInput), shown as "~65%".
+    bool approximate = false;
 
     bool operator==(const DeviceEntry&) const = default;
 };
+
+DeviceType DetectDeviceType(const std::wstring& name,
+                            const std::vector<std::wstring>& categories,
+                            const Settings& settings);
+
+bool IsDeviceExcluded(const std::wstring& name, const Settings& settings) {
+    for (auto& e : settings.excludedDevices) {
+        if (ContainsNoCase(name, e)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Adds a device read directly from hardware, applying the same filters as
+// the devices Windows reports.
+void AddDirectDevice(std::vector<DeviceEntry>& result,
+                     const Settings& settings,
+                     std::wstring name,
+                     int battery,
+                     bool charging,
+                     bool approximate) {
+    if (IsDeviceExcluded(name, settings) || battery > settings.showOnlyBelow) {
+        return;
+    }
+
+    Wh_Log(L"%s: %d%%%s%s", name.c_str(), battery,
+           approximate ? L" (approximate)" : L"",
+           charging ? L" (charging)" : L"");
+
+    DeviceType type = DetectDeviceType(name, {}, settings);
+    result.push_back({std::move(name), battery, type, charging, approximate});
+}
 
 std::optional<int> PropertyToInt(const IInspectable& value) {
     auto pv = value.try_as<IPropertyValue>();
@@ -471,6 +541,564 @@ std::wstring GuidToString(const winrt::guid& g) {
     return ToLower(buffer);
 }
 
+// ---------------------------------------------------------------------------
+// Sony controllers (DualShock 4, DualSense)
+//
+// These don't report their battery to Windows, but include it in the input
+// reports they stream. Over Bluetooth they start in a basic mode without it,
+// and switch to the full reports once a calibration feature report is read,
+// as Steam and DS4Windows do. Battery and charging bits follow the Linux
+// hid-playstation driver.
+// ---------------------------------------------------------------------------
+
+enum class SonyModel { DualShock4, DualSense };
+
+struct SonyBatteryReading {
+    int battery;
+    bool charging;
+};
+
+std::optional<SonyModel> SonyModelFromProductId(USHORT productId) {
+    switch (productId) {
+        case 0x05C4:  // DualShock 4 (first generation)
+        case 0x09CC:  // DualShock 4 (second generation)
+        case 0x0BA0:  // DualShock 4 USB wireless adapter
+            return SonyModel::DualShock4;
+        case 0x0CE6:  // DualSense
+        case 0x0DF2:  // DualSense Edge
+            return SonyModel::DualSense;
+    }
+    return std::nullopt;
+}
+
+std::optional<SonyBatteryReading> ParseSonyReport(SonyModel model,
+                                                  const BYTE* report,
+                                                  DWORD size,
+                                                  bool usbLayout) {
+    if (size < 1) {
+        return std::nullopt;
+    }
+
+    BYTE id = report[0];
+
+    if (model == SonyModel::DualShock4) {
+        size_t offset;
+        if (id == 0x11) {
+            offset = 32;  // Bluetooth full report.
+        } else if (id == 0x01 && usbLayout) {
+            offset = 30;  // USB report.
+        } else {
+            return std::nullopt;
+        }
+        if (offset >= size) {
+            return std::nullopt;
+        }
+
+        BYTE status = report[offset];
+        int level = status & 0x0F;
+        bool cable = (status & 0x10) != 0;
+        if (cable) {
+            if (level < 10) {
+                return SonyBatteryReading{level * 10 + 5, true};
+            }
+            if (level == 10) {
+                return SonyBatteryReading{100, false};
+            }
+            return std::nullopt;
+        }
+        return SonyBatteryReading{std::min((level + 1) * 10 + 5, 100), false};
+    }
+
+    size_t offset;
+    if (id == 0x31) {
+        offset = 54;  // Bluetooth full report.
+    } else if (id == 0x01 && usbLayout) {
+        offset = 53;  // USB report.
+    } else {
+        return std::nullopt;
+    }
+    if (offset >= size) {
+        return std::nullopt;
+    }
+
+    BYTE status = report[offset];
+    int level = status & 0x0F;
+    switch ((status & 0xF0) >> 4) {
+        case 0x0:
+            return SonyBatteryReading{std::min(level * 10 + 5, 100), false};
+        case 0x1:
+            return SonyBatteryReading{std::min(level * 10 + 5, 100), true};
+        case 0x2:
+            return SonyBatteryReading{100, false};
+    }
+    return std::nullopt;
+}
+
+std::optional<SonyBatteryReading> ReadSonyBattery(PCWSTR devicePath,
+                                                  SonyModel model) {
+    HANDLE device = CreateFile(devicePath, GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    if (device == INVALID_HANDLE_VALUE) {
+        Wh_Log(L"Can't open controller: %u", GetLastError());
+        return std::nullopt;
+    }
+
+    std::optional<SonyBatteryReading> result;
+    PHIDP_PREPARSED_DATA preparsed = nullptr;
+    HANDLE event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
+    do {
+        HIDP_CAPS caps{};
+        if (!event || !HidD_GetPreparsedData(device, &preparsed) ||
+            HidP_GetCaps(preparsed, &caps) != HIDP_STATUS_SUCCESS ||
+            caps.InputReportByteLength == 0) {
+            break;
+        }
+
+        // Over USB the reports are 64 bytes. Bluetooth descriptors declare
+        // larger ones, and need the switch to the full reports.
+        bool usbLayout = caps.InputReportByteLength == 64;
+        if (!usbLayout && caps.FeatureReportByteLength > 0) {
+            std::vector<BYTE> feature(caps.FeatureReportByteLength);
+            feature[0] = model == SonyModel::DualShock4 ? 0x02 : 0x05;
+            if (!HidD_GetFeature(device, feature.data(),
+                                 (ULONG)feature.size())) {
+                Wh_Log(L"Feature report failed: %u", GetLastError());
+            }
+        }
+
+        std::vector<BYTE> report(caps.InputReportByteLength);
+        for (int attempt = 0; attempt < 16 && !result; attempt++) {
+            OVERLAPPED overlapped{};
+            overlapped.hEvent = event;
+            ResetEvent(event);
+
+            DWORD read = 0;
+            if (!ReadFile(device, report.data(), (DWORD)report.size(), &read,
+                          &overlapped)) {
+                if (GetLastError() != ERROR_IO_PENDING) {
+                    break;
+                }
+                if (WaitForSingleObject(event, 500) != WAIT_OBJECT_0) {
+                    CancelIoEx(device, &overlapped);
+                    GetOverlappedResult(device, &overlapped, &read, TRUE);
+                    break;
+                }
+                if (!GetOverlappedResult(device, &overlapped, &read, FALSE)) {
+                    break;
+                }
+            }
+
+            result = ParseSonyReport(model, report.data(), read, usbLayout);
+        }
+    } while (false);
+
+    if (preparsed) {
+        HidD_FreePreparsedData(preparsed);
+    }
+    if (event) {
+        CloseHandle(event);
+    }
+    CloseHandle(device);
+    return result;
+}
+
+void QuerySonyControllers(const Settings& settings,
+                          std::vector<DeviceEntry>& result) {
+    GUID hidGuid;
+    HidD_GetHidGuid(&hidGuid);
+
+    HDEVINFO devInfo = SetupDiGetClassDevs(
+        &hidGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (devInfo == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    int counts[2] = {};
+
+    SP_DEVICE_INTERFACE_DATA interfaceData{sizeof(interfaceData)};
+    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(devInfo, nullptr, &hidGuid,
+                                                  i, &interfaceData);
+         i++) {
+        DWORD size = 0;
+        SetupDiGetDeviceInterfaceDetail(devInfo, &interfaceData, nullptr, 0,
+                                        &size, nullptr);
+        if (!size) {
+            continue;
+        }
+
+        std::vector<BYTE> buffer(size);
+        auto* detail =
+            reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buffer.data());
+        detail->cbSize = sizeof(*detail);
+        if (!SetupDiGetDeviceInterfaceDetail(devInfo, &interfaceData, detail,
+                                             size, nullptr, nullptr)) {
+            continue;
+        }
+
+        // Cheap check by path before opening anything: Sony's vendor id.
+        std::wstring path = ToLower(detail->DevicePath);
+        if (path.find(L"054c") == std::wstring::npos) {
+            continue;
+        }
+
+        HANDLE probe =
+            CreateFile(detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       nullptr, OPEN_EXISTING, 0, nullptr);
+        if (probe == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+        HIDD_ATTRIBUTES attributes{sizeof(attributes)};
+        bool gotAttributes = HidD_GetAttributes(probe, &attributes);
+        CloseHandle(probe);
+        if (!gotAttributes || attributes.VendorID != 0x054C) {
+            continue;
+        }
+
+        auto model = SonyModelFromProductId(attributes.ProductID);
+        if (!model) {
+            continue;
+        }
+
+        auto reading = ReadSonyBattery(detail->DevicePath, *model);
+        if (!reading) {
+            Wh_Log(L"No battery reading from %s", detail->DevicePath);
+            continue;
+        }
+
+        int& count = counts[*model == SonyModel::DualShock4 ? 0 : 1];
+        count++;
+        std::wstring name = *model == SonyModel::DualShock4 ? L"PS4 Controller"
+                                                            : L"PS5 Controller";
+        if (count > 1) {
+            name += L" " + std::to_wstring(count);
+        }
+
+        AddDirectDevice(result, settings, std::move(name), reading->battery,
+                        reading->charging, /*approximate=*/false);
+    }
+
+    SetupDiDestroyDeviceInfoList(devInfo);
+}
+
+// ---------------------------------------------------------------------------
+// Xbox controllers through USB or the Xbox Wireless Adapter (XInput)
+//
+// XInput reports the battery in four coarse levels. Controllers paired over
+// Bluetooth show up here as well, but Windows already reports their exact
+// level, so as many controllers as Windows listed are skipped.
+// ---------------------------------------------------------------------------
+
+using XInputGetState_t = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+using XInputGetBatteryInformation_t =
+    DWORD(WINAPI*)(DWORD, BYTE, XINPUT_BATTERY_INFORMATION*);
+
+void QueryXInputControllers(const Settings& settings,
+                            std::vector<DeviceEntry>& result,
+                            int bluetoothXboxCount) {
+    // Loaded for every query: a long running process doesn't otherwise
+    // notice controllers which connect after XInput was loaded.
+    HMODULE module = LoadLibraryEx(L"xinput1_4.dll", nullptr,
+                                   LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module) {
+        return;
+    }
+
+    auto getState =
+        (XInputGetState_t)GetProcAddress(module, "XInputGetState");
+    auto getBattery = (XInputGetBatteryInformation_t)GetProcAddress(
+        module, "XInputGetBatteryInformation");
+
+    struct Reading {
+        int level;  // -1 when unknown.
+    };
+    std::vector<Reading> readings;
+
+    if (getState && getBattery) {
+        for (DWORD i = 0; i < XUSER_MAX_COUNT; i++) {
+            XINPUT_STATE state{};
+            if (getState(i, &state) != ERROR_SUCCESS) {
+                continue;
+            }
+
+            XINPUT_BATTERY_INFORMATION battery{};
+            if (getBattery(i, BATTERY_DEVTYPE_GAMEPAD, &battery) !=
+                ERROR_SUCCESS) {
+                battery.BatteryType = BATTERY_TYPE_UNKNOWN;
+            }
+
+            Wh_Log(L"XInput %u: battery type %u, level %u", i,
+                   battery.BatteryType, battery.BatteryLevel);
+
+            switch (battery.BatteryType) {
+                case BATTERY_TYPE_WIRED:
+                    // No battery to show.
+                    break;
+                case BATTERY_TYPE_ALKALINE:
+                case BATTERY_TYPE_NIMH: {
+                    static const int kLevels[] = {5, 30, 65, 100};
+                    readings.push_back(
+                        {kLevels[std::min<BYTE>(battery.BatteryLevel, 3)]});
+                    break;
+                }
+                default:
+                    readings.push_back({-1});
+                    break;
+            }
+        }
+    }
+
+    FreeLibrary(module);
+
+    // Skip the controllers Windows already reported, those without a known
+    // level first.
+    std::stable_sort(readings.begin(), readings.end(),
+                     [](const Reading& a, const Reading& b) {
+                         return a.level < 0 && b.level >= 0;
+                     });
+    int skip = std::min<int>(bluetoothXboxCount, (int)readings.size());
+    readings.erase(readings.begin(), readings.begin() + skip);
+
+    int count = 0;
+    for (const auto& reading : readings) {
+        if (reading.level < 0) {
+            continue;
+        }
+        count++;
+        std::wstring name = L"Xbox Controller";
+        if (count > 1) {
+            name += L" " + std::to_wstring(count);
+        }
+        AddDirectDevice(result, settings, std::move(name), reading.level,
+                        /*charging=*/false, /*approximate=*/true);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Razer mice (HyperSpeed dongle or cable)
+//
+// Razer mice answer 90-byte feature report requests on their mouse HID
+// interface, as documented by the OpenRazer project: command class 0x07,
+// id 0x80 returns the battery level (0-255) and id 0x84 the charging state.
+// ---------------------------------------------------------------------------
+
+#pragma pack(push, 1)
+struct RazerReport {
+    BYTE reportId;
+    BYTE status;
+    BYTE transactionId;
+    USHORT remainingPackets;
+    BYTE protocolType;
+    BYTE dataSize;
+    BYTE commandClass;
+    BYTE commandId;
+    BYTE arguments[80];
+    BYTE crc;
+    BYTE reserved;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(RazerReport) == 91);
+
+struct RazerModel {
+    USHORT productId;
+    PCWSTR name;
+    bool wired;
+};
+
+const RazerModel kRazerModels[] = {
+    {0x007A, L"Razer Viper Ultimate", true},
+    {0x007B, L"Razer Viper Ultimate", false},
+    {0x007C, L"Razer DeathAdder V2 Pro", true},
+    {0x007D, L"Razer DeathAdder V2 Pro", false},
+    {0x0083, L"Razer Basilisk X HyperSpeed", false},
+    {0x0088, L"Razer Basilisk Ultimate", false},
+    {0x008F, L"Razer Naga Pro", true},
+    {0x0090, L"Razer Naga Pro", false},
+    {0x00A5, L"Razer Viper V2 Pro", true},
+    {0x00A6, L"Razer Viper V2 Pro", false},
+    {0x00AA, L"Razer Basilisk V3 Pro", true},
+    {0x00AB, L"Razer Basilisk V3 Pro", false},
+    {0x00B2, L"Razer DeathAdder V3 HyperSpeed", false},
+    {0x00B6, L"Razer DeathAdder V3 Pro", true},
+    {0x00B7, L"Razer DeathAdder V3 Pro", false},
+    {0x00C0, L"Razer Viper V3 Pro", true},
+    {0x00C1, L"Razer Viper V3 Pro", false},
+};
+
+BYTE RazerCrc(const RazerReport& report) {
+    // XOR of the bytes from the remaining packets field up to the arguments,
+    // counted without the report id.
+    const BYTE* bytes = reinterpret_cast<const BYTE*>(&report) + 1;
+    BYTE crc = 0;
+    for (int i = 2; i < 88; i++) {
+        crc ^= bytes[i];
+    }
+    return crc;
+}
+
+bool RazerQuery(HANDLE device,
+                BYTE transactionId,
+                BYTE commandClass,
+                BYTE commandId,
+                RazerReport& response) {
+    RazerReport request{};
+    request.transactionId = transactionId;
+    request.dataSize = 0x02;
+    request.commandClass = commandClass;
+    request.commandId = commandId;
+    request.crc = RazerCrc(request);
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (g_unloading) {
+            return false;
+        }
+        if (!HidD_SetFeature(device, &request, sizeof(request))) {
+            return false;
+        }
+        Sleep(60);
+        response = {};
+        if (!HidD_GetFeature(device, &response, sizeof(response))) {
+            return false;
+        }
+        if (response.status == 0x02 &&
+            response.commandClass == commandClass &&
+            response.commandId == commandId) {
+            return true;
+        }
+        if (response.status != 0x01) {  // 0x01: busy, try again.
+            return false;
+        }
+        Sleep(100);
+    }
+    return false;
+}
+
+void QueryRazerMice(const Settings& settings,
+                    std::vector<DeviceEntry>& result) {
+    struct Reading {
+        std::wstring name;
+        bool wired;
+        int battery;
+        bool charging;
+    };
+    std::vector<Reading> readings;
+
+    GUID hidGuid;
+    HidD_GetHidGuid(&hidGuid);
+
+    HDEVINFO devInfo = SetupDiGetClassDevs(
+        &hidGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (devInfo == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    SP_DEVICE_INTERFACE_DATA interfaceData{sizeof(interfaceData)};
+    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(devInfo, nullptr, &hidGuid,
+                                                  i, &interfaceData);
+         i++) {
+        DWORD size = 0;
+        SetupDiGetDeviceInterfaceDetail(devInfo, &interfaceData, nullptr, 0,
+                                        &size, nullptr);
+        if (!size) {
+            continue;
+        }
+
+        std::vector<BYTE> buffer(size);
+        auto* detail =
+            reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buffer.data());
+        detail->cbSize = sizeof(*detail);
+        if (!SetupDiGetDeviceInterfaceDetail(devInfo, &interfaceData, detail,
+                                             size, nullptr, nullptr)) {
+            continue;
+        }
+
+        if (ToLower(detail->DevicePath).find(L"vid_1532") ==
+            std::wstring::npos) {
+            continue;
+        }
+
+        HANDLE device = CreateFile(detail->DevicePath, 0,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                   OPEN_EXISTING, 0, nullptr);
+        if (device == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+
+        HIDD_ATTRIBUTES attributes{sizeof(attributes)};
+        HIDP_CAPS caps{};
+        bool capsOk = false;
+        PHIDP_PREPARSED_DATA preparsed = nullptr;
+        if (HidD_GetAttributes(device, &attributes) &&
+            HidD_GetPreparsedData(device, &preparsed)) {
+            capsOk = HidP_GetCaps(preparsed, &caps) == HIDP_STATUS_SUCCESS;
+            HidD_FreePreparsedData(preparsed);
+        }
+
+        // The mouse collection carries the 90-byte feature reports.
+        if (capsOk && caps.UsagePage == 0x01 && caps.Usage == 0x02 &&
+            caps.FeatureReportByteLength == sizeof(RazerReport)) {
+            const RazerModel* model = nullptr;
+            for (const auto& m : kRazerModels) {
+                if (m.productId == attributes.ProductID) {
+                    model = &m;
+                    break;
+                }
+            }
+
+            // Different models expect different transaction ids.
+            for (BYTE transactionId : {0x1F, 0x3F, 0xFF}) {
+                RazerReport response{};
+                if (!RazerQuery(device, transactionId, 0x07, 0x80, response)) {
+                    continue;
+                }
+
+                Reading reading{model ? model->name : L"Razer Mouse",
+                                model && model->wired,
+                                (response.arguments[1] * 100 + 127) / 255,
+                                false};
+                if (RazerQuery(device, transactionId, 0x07, 0x84, response)) {
+                    reading.charging = response.arguments[1] != 0;
+                }
+                readings.push_back(std::move(reading));
+                break;
+            }
+        }
+
+        CloseHandle(device);
+    }
+
+    SetupDiDestroyDeviceInfoList(devInfo);
+
+    // A mouse plugged in by cable shows up twice, through the cable and
+    // through the dongle. Keep one, preferring the cable reading.
+    std::vector<std::wstring> seen;
+    for (const auto& reading : readings) {
+        if (std::find(seen.begin(), seen.end(), reading.name) != seen.end()) {
+            continue;
+        }
+        seen.push_back(reading.name);
+
+        const Reading* best = &reading;
+        bool charging = false;
+        for (const auto& other : readings) {
+            if (other.name != reading.name) {
+                continue;
+            }
+            if (other.wired && !best->wired) {
+                best = &other;
+            }
+            if (other.charging || (other.wired && other.battery < 100)) {
+                charging = true;
+            }
+        }
+
+        AddDirectDevice(result, settings, best->name, best->battery, charging,
+                        /*approximate=*/false);
+    }
+}
+
 std::vector<DeviceEntry> QueryDevices(const Settings& settings) {
     auto deviceProps = winrt::single_threaded_vector<winrt::hstring>(
         {kBatteryKey, kContainerIdKey});
@@ -563,6 +1191,31 @@ std::vector<DeviceEntry> QueryDevices(const Settings& settings) {
             Wh_Log(L"Container %s query failed: %08X", id.c_str(),
                    winrt::to_hresult().value);
         }
+    }
+
+    // Counted before anything is added below, so that only the controllers
+    // Windows reported count.
+    int bluetoothXboxCount = (int)std::count_if(
+        result.begin(), result.end(), [](const DeviceEntry& d) {
+            return ContainsNoCase(d.name, L"xbox");
+        });
+
+    try {
+        QuerySonyControllers(settings, result);
+    } catch (...) {
+        Wh_Log(L"Sony controller query failed");
+    }
+
+    try {
+        QueryXInputControllers(settings, result, bluetoothXboxCount);
+    } catch (...) {
+        Wh_Log(L"XInput query failed");
+    }
+
+    try {
+        QueryRazerMice(settings, result);
+    } catch (...) {
+        Wh_Log(L"Razer query failed");
     }
 
     std::sort(result.begin(), result.end(),
@@ -1063,12 +1716,13 @@ std::wstring MakeSignature(const std::vector<DeviceEntry>& devices,
                      std::to_wstring((int)theme);
     for (auto& d : devices) {
         s += L"|" + d.name + L":" + std::to_wstring(d.battery) + L":" +
-             std::to_wstring((int)d.type);
+             std::to_wstring((int)d.type) + L":" +
+             std::to_wstring(d.charging) + std::to_wstring(d.approximate);
     }
     return s;
 }
 
-UIElement CreateDeviceItem(const DeviceEntry& device,
+UIElement CreateDeviceItem(const DeviceEntry& device, ElementTheme theme,
                            const Settings& settings) {
     bool low = device.battery <= settings.lowBatteryThreshold &&
                settings.lowBatteryColor.has_value();
@@ -1089,24 +1743,75 @@ UIElement CreateDeviceItem(const DeviceEntry& device,
     // A background makes the whole item respond to hover and clicks.
     item.Background(Media::SolidColorBrush(winrt::Windows::UI::Color{0, 0, 0, 0}));
 
-    if (settings.showIcon) {
+    auto makeGlyph = [&](wchar_t glyph, double size) {
         Controls::FontIcon icon;
-        icon.FontFamily(Media::FontFamily(L"Segoe Fluent Icons, Segoe MDL2 Assets"));
-        icon.Glyph(std::wstring(1, GlyphForType(device.type)));
-        icon.FontSize(settings.iconSize);
+        icon.FontFamily(
+            Media::FontFamily(L"Segoe Fluent Icons, Segoe MDL2 Assets"));
+        icon.Glyph(std::wstring(1, glyph));
+        icon.FontSize(size);
         icon.VerticalAlignment(VerticalAlignment::Center);
         if (low && settings.colorIconWhenLow) {
             icon.Foreground(lowBrush);
         } else if (normalBrush) {
             icon.Foreground(normalBrush);
         }
-        item.Children().Append(icon);
+        return icon;
+    };
+
+    bool showIcon = settings.displayMode != DisplayMode::percentOnly;
+    bool showText = settings.displayMode == DisplayMode::iconAndPercent ||
+                    settings.displayMode == DisplayMode::percentOnly;
+    bool showBar = settings.displayMode == DisplayMode::batteryBar;
+
+    if (showIcon) {
+        item.Children().Append(
+            makeGlyph(GlyphForType(device.type), settings.iconSize));
     }
 
-    if (settings.showPercentage) {
+    if (showBar) {
+        // The bar follows the text color, which by default is the taskbar's.
+        Media::Brush barBrush = low ? lowBrush : normalBrush;
+        if (!barBrush) {
+            barBrush = Media::SolidColorBrush(
+                theme == ElementTheme::Light
+                    ? winrt::Windows::UI::Color{0xFF, 0x00, 0x00, 0x00}
+                    : winrt::Windows::UI::Color{0xFF, 0xFF, 0xFF, 0xFF});
+        }
+        double barWidth = std::max(16.0, settings.iconSize * 1.5);
+        double barHeight = std::max(8.0, settings.iconSize * 0.6);
+
+        Controls::Border outer;
+        outer.Width(barWidth);
+        outer.Height(barHeight);
+        outer.BorderThickness(ThicknessHelper::FromUniformLength(1));
+        outer.CornerRadius(CornerRadiusHelper::FromUniformRadius(2));
+        outer.Padding(ThicknessHelper::FromUniformLength(1));
+        outer.VerticalAlignment(VerticalAlignment::Center);
+        outer.BorderBrush(barBrush);
+
+        Controls::Border fill;
+        fill.HorizontalAlignment(HorizontalAlignment::Left);
+        fill.Width(std::max(1.0, (barWidth - 4) * device.battery / 100.0));
+        fill.CornerRadius(CornerRadiusHelper::FromUniformRadius(1));
+        fill.Background(barBrush);
+        outer.Child(fill);
+        item.Children().Append(outer);
+    }
+
+    if (showText) {
         Controls::TextBlock text;
-        text.Text(std::to_wstring(device.battery) + L"%");
+        std::wstring value = std::to_wstring(device.battery) + L"%";
+        if (device.approximate) {
+            value = L"~" + value;
+        }
+        text.Text(value);
         text.FontSize(settings.fontSize);
+        if (!settings.fontFamily.empty()) {
+            text.FontFamily(Media::FontFamily(settings.fontFamily));
+        }
+        if (settings.bold) {
+            text.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        }
         text.VerticalAlignment(VerticalAlignment::Center);
         // Center the visible glyphs instead of the full line box.
         text.TextLineBounds(TextLineBounds::Tight);
@@ -1123,10 +1828,21 @@ UIElement CreateDeviceItem(const DeviceEntry& device,
         item.Children().Append(text);
     }
 
+    if (device.charging && settings.showChargingIndicator) {
+        // LightningBolt.
+        item.Children().Append(makeGlyph(0xE945, settings.iconSize * 0.75));
+    }
+
     if (settings.showTooltip) {
-        Controls::ToolTipService::SetToolTip(
-            item, winrt::box_value(device.name + L": " +
-                                   std::to_wstring(device.battery) + L"%"));
+        std::wstring tooltip = device.name + L": ";
+        if (device.approximate) {
+            tooltip += L"about ";
+        }
+        tooltip += std::to_wstring(device.battery) + L"%";
+        if (device.charging) {
+            tooltip += L" (charging)";
+        }
+        Controls::ToolTipService::SetToolTip(item, winrt::box_value(tooltip));
     }
 
     if (settings.openSettingsOnClick) {
@@ -1240,7 +1956,7 @@ void UpdateTaskbar(const std::vector<DeviceEntry>& devices,
     auto children = panel.Children();
     children.Clear();
     for (auto& device : devices) {
-        children.Append(CreateDeviceItem(device, settings));
+        children.Append(CreateDeviceItem(device, theme, settings));
     }
 
     panel.Visibility(devices.empty() ? Visibility::Collapsed
